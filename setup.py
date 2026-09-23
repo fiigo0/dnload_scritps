@@ -54,7 +54,44 @@ def run(cmd: list[str], capture: bool = False) -> subprocess.CompletedProcess:
 
 
 def pip(*args: str) -> subprocess.CompletedProcess:
-    return run([sys.executable, "-m", "pip", *args])
+    return run([sys.executable, "-m", "pip", *args], capture=True)
+
+
+def pip_install(pkg: str, upgrade: bool = False) -> bool:
+    """Install (or upgrade) a pip package with automatic fallbacks for common failure modes."""
+    probe = run([sys.executable, "-m", "pip", "--version"], capture=True)
+    if probe.returncode != 0:
+        log.error("pip is not available for %s. Install pip first.", sys.executable)
+        return False
+
+    base_args = ["install"] + (["--upgrade"] if upgrade else []) + [pkg]
+
+    result = pip(*base_args)
+    if result.returncode == 0:
+        return True
+
+    combined = (result.stdout or "") + (result.stderr or "")
+
+    # macOS Homebrew / PEP 668 "externally managed environment" → --break-system-packages
+    if "externally-managed-environment" in combined or "externally managed" in combined.lower():
+        log.warning("Externally managed environment detected — retrying with --break-system-packages…")
+        result = pip(*base_args, "--break-system-packages")
+        if result.returncode == 0:
+            return True
+
+    # Permission error → retry with --user
+    if "Permission" in combined or "permission denied" in combined.lower():
+        log.warning("Permission denied — retrying with --user flag…")
+        result = pip(*base_args, "--user")
+        if result.returncode == 0:
+            return True
+
+    # Show the full pip output so the user sees the real error
+    if result.stdout:
+        log.error("pip stdout:\n%s", result.stdout.strip())
+    if result.stderr:
+        log.error("pip stderr:\n%s", result.stderr.strip())
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +285,13 @@ def install_packages() -> None:
         log.info("[OK] JS runtime already present, skipping.")
 
     log.info("Upgrading pip…")
-    pip("install", "--upgrade", "pip")
+    r = pip("install", "--upgrade", "pip")
+    if r.returncode != 0:
+        log.warning("Could not upgrade pip — continuing with current version.")
 
     for pkg in REQUIRED_PACKAGES:
         log.info("Installing %s…", pkg)
-        result = pip("install", pkg)
-        if result.returncode == 0:
+        if pip_install(pkg):
             log.info("[OK] %s installed successfully.", pkg)
         else:
             log.error("[FAIL] Could not install %s.", pkg)
@@ -265,13 +303,13 @@ def update_packages() -> None:
     log.info("─" * 50)
 
     log.info("Upgrading pip…")
-    pip("install", "--upgrade", "pip")
+    r = pip("install", "--upgrade", "pip")
+    if r.returncode != 0:
+        log.warning("Could not upgrade pip — continuing with current version.")
 
     for pkg in REQUIRED_PACKAGES:
         log.info("Updating %s…", pkg)
-        result = pip("install", "--upgrade", pkg)
-        if result.returncode == 0:
-            # Print new version
+        if pip_install(pkg, upgrade=True):
             check_package(pkg)
             log.info("[OK] %s updated.", pkg)
         else:
